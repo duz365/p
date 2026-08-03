@@ -48,7 +48,6 @@ class Room {
         this.swapped = false;
         this.cards = [[], []];
         this.moves = [null, null];
-        this.chat = [];
     }
 
     addPlayer(ws) {
