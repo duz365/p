@@ -134,12 +134,37 @@
         let locked = false;
         let wasSwapped = false;
 
+        let reconnectTimer = null;
+        let manualClose = false;
         function connect() {
+            if (location.protocol === 'file:') {
+                $('error').textContent = '请通过服务器访问，不要直接双击 index.html。\n在项目目录运行 node server.js 后，用浏览器打开 http://localhost:8080';
+                return;
+            }
             const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-            ws = new WebSocket(`${proto}://${location.host}`);
-            ws.onopen = () => { $('error').textContent = ''; };
-            ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } handle(m); };
-            ws.onclose = () => { $('status').textContent = '连接已断开，请刷新重连'; };
+            try {
+                ws = new WebSocket(`${proto}://${location.host}`);
+            } catch (e) {
+                $('error').textContent = 'WebSocket 连接失败: ' + e.message;
+                return;
+            }
+            ws.onopen = () => {
+                $('error').textContent = '';
+                $('status').textContent = '已连接，等待操作…';
+            };
+            ws.onmessage = e => {
+                let m; try { m = JSON.parse(e.data); } catch { return; }
+                handle(m);
+            };
+            ws.onerror = () => {
+                $('error').textContent = '连接出错，正在重连…';
+            };
+            ws.onclose = () => {
+                if (manualClose) return;
+                $('status').textContent = '连接已断开，正在重连…';
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                reconnectTimer = setTimeout(connect, 1500);
+            };
         }
 
         function handle(m) {

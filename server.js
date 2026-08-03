@@ -166,8 +166,20 @@ class Room {
 
 const rooms = new Map();
 
+// 心跳保活：防止代理/免费平台掐断空闲连接
+const HEARTBEAT_INTERVAL = 30000;
+setInterval(() => {
+    wss.clients.forEach(ws => {
+        if (ws.isAlive === false) return ws.terminate();
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, HEARTBEAT_INTERVAL);
+
 wss.on('connection', (ws) => {
     ws.roomId = null;
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
 
     ws.on('message', (raw) => {
         let msg;
