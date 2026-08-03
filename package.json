@@ -1,0 +1,12 @@
+{
+  "name": "emperor-slave",
+  "version": "1.0.0",
+  "description": "皇帝与奴隶 - 双人心理博弈联机对战",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
