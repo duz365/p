@@ -184,6 +184,10 @@
                     showGameArea();
                     renderSide();
                     break;
+                case 'sideSwap':
+                    mySide = m.newSide;
+                    renderSide();
+                    break;
                 case 'newRound':
                     round = m.round;
                     scores = m.scores.slice();
