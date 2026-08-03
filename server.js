@@ -17,18 +17,17 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
-const TOTAL_ROUNDS = 12;
-const SWAP_AFTER = 5;       // 5回合后交换阵营
-const ROUND_DELAY = 2600;   // 结算后延迟
+const TOTAL_ROUNDS = 5;        // 一局5回合
+const ROUND_DELAY = 2600;      // 结算后延迟
+const PROP_TIMER = null;
 
-const CARD_EMOJI = { emperor: '👑', citizen: '🏙️', slave: '⛓️' };
 const CARD_NAME = { emperor: '皇帝', citizen: '市民', slave: '奴隶' };
 
 // 出牌胜负矩阵：key 克 value 则 true
 const BEATS = { emperor: ['citizen'], citizen: ['slave'], slave: ['emperor'] };
-const SCORE = { emperor: 5, citizen: 1, slave: 5 };
 
-function shuffledCards(side) {
+// 每方5张：1张身份牌 + 4张市民（新规则不再重新发牌，用完即弃）
+function dealCards(side) {
     const special = side === 'emperor' ? 'emperor' : 'slave';
     const cards = [special, 'citizen', 'citizen', 'citizen', 'citizen'];
     for (let i = cards.length - 1; i > 0; i--) {
@@ -41,13 +40,16 @@ function shuffledCards(side) {
 class Room {
     constructor(roomId) {
         this.roomId = roomId;
-        this.ws = [null, null];       // 两个玩家连接
-        this.sides = [null, null];    // 阵营
-        this.scores = [0, 0];
+        this.ws = [null, null];
+        this.sides = [null, null];
+        this.hands = [[], []];      // 剩余手牌
         this.round = 0;
         this.swapped = false;
-        this.cards = [[], []];
         this.moves = [null, null];
+        this.running = false;
+        this.over = false;
+        this.settleTimer = null;
+        this.rematchReady = [false, false];
     }
 
     addPlayer(ws) {
@@ -61,41 +63,54 @@ class Room {
         const rand = Math.random() < 0.5;
         this.sides[0] = rand ? 'emperor' : 'slave';
         this.sides[1] = rand ? 'slave' : 'emperor';
-        this.broadcastTo(0, { type: 'gameStart', side: this.sides[0], player: 0 });
-        this.broadcastTo(1, { type: 'gameStart', side: this.sides[1], player: 1 });
+
+        this.round = 0;
+        this.moves = [null, null];
+        this.running = true;
+        this.over = false;
+        this.rematchReady = [false, false];
+
+        // 发一手牌（不再在每回合重新发）
+        this.hands[0] = dealCards(this.sides[0]);
+        this.hands[1] = dealCards(this.sides[1]);
+
+        this.broadcastTo(0, { type: 'gameStart', side: this.sides[0], player: 0, round: TOTAL_ROUNDS });
+        this.broadcastTo(1, { type: 'gameStart', side: this.sides[1], player: 1, round: TOTAL_ROUNDS });
+        this.broadcast({ type: 'gameReady', round: TOTAL_ROUNDS });
         this.newRound();
     }
 
     newRound() {
         this.round++;
         this.moves = [null, null];
-        // 5回合后交换阵营
-        if (this.round === SWAP_AFTER + 1 && !this.swapped) {
-            this.swapped = true;
-            this.sides.reverse();
-            this.broadcastTo(0, { type: 'sideSwap', newSide: this.sides[0] });
-            this.broadcastTo(1, { type: 'sideSwap', newSide: this.sides[1] });
-        }
-        this.cards[0] = shuffledCards(this.sides[0]);
-        this.cards[1] = shuffledCards(this.sides[1]);
-        this.broadcast({
-            type: 'newRound',
-            round: this.round,
-            total: TOTAL_ROUNDS,
-            scores: this.scores.slice(),
-            swapped: this.swapped,
-        });
+        // 发给各自剩余手牌
+        this.broadcastTo(0, { type: 'newRound', round: this.round, total: TOTAL_ROUNDS, hand: this.hands[0].slice() });
+        this.broadcastTo(1, { type: 'newRound', round: this.round, total: TOTAL_ROUNDS, hand: this.hands[1].slice() });
     }
 
     play(ws, card) {
+        if (!this.running || this.over) return;
         const i = this.ws.indexOf(ws);
         if (i === -1 || this.moves[i] !== null) return;
-        if (!this.cards[i].includes(card)) return;
+        if (!this.hands[i].includes(card)) return;
+
+        // 用掉并丢弃这张牌
+        this.hands[i] = this.removeOne(this.hands[i], card);
+
         this.moves[i] = card;
-        this.broadcastTo(i, { type: 'moveLocked', card });
+        this.broadcastTo(i, { type: 'moveLocked', card, hand: this.hands[i].slice() });
+
         if (this.moves[0] !== null && this.moves[1] !== null) {
             this.settle();
         }
+    }
+
+    removeOne(arr, card) {
+        const idx = arr.indexOf(card);
+        if (idx === -1) return arr;
+        const copy = arr.slice();
+        copy.splice(idx, 1);
+        return copy;
     }
 
     settle() {
@@ -105,35 +120,51 @@ class Room {
             if (BEATS[a].includes(b)) winnerIdx = 0;
             else if (BEATS[b].includes(a)) winnerIdx = 1;
         }
-        let score = 0;
-        if (winnerIdx === 0) score = SCORE[a];
-        else if (winnerIdx === 1) score = SCORE[b];
-        if (winnerIdx !== -1) this.scores[winnerIdx] += score;
 
+        // 广播本回合结果（含双方出的牌）
         const result = {
             type: 'roundResult',
             round: this.round,
             cards: [CARD_NAME[a], CARD_NAME[b]],
             winner: winnerIdx === -1 ? -1 : winnerIdx,
-            score,
-            scores: this.scores.slice(),
         };
-        this.broadcast(result);
 
-        if (this.round >= TOTAL_ROUNDS) {
-            const win = this.scores[0] === this.scores[1] ? -1 : (this.scores[0] > this.scores[1] ? 0 : 1);
-            const over = {
-                type: 'gameOver',
-                winner: win,
-                scores: this.scores.slice(),
-            };
-            this.broadcastTo(0, { ...over, youWin: win === 0 });
-            this.broadcastTo(1, { ...over, youWin: win === 1 });
-            const self = this;
-            setTimeout(() => self.destroy(), 5000);
+        if (winnerIdx !== -1) {
+            // 有一方输，立即整局结束
+            this.broadcast(result);
+            this.over = true;
+            this.running = false;
+            setTimeout(() => {
+                this.broadcastTo(0, { type: 'gameOver', winner: winnerIdx, youWin: winnerIdx === 0 });
+                this.broadcastTo(1, { type: 'gameOver', winner: winnerIdx, youWin: winnerIdx === 1 });
+            }, 1200);
         } else {
-            const self = this;
-            setTimeout(() => self.newRound(), ROUND_DELAY);
+            // 平局：若牌已用尽则平局结束，否则下一回合
+            if (this.round >= TOTAL_ROUNDS || (this.hands[0].length === 0 && this.hands[1].length === 0)) {
+                this.broadcast(result);
+                this.over = true;
+                this.running = false;
+                setTimeout(() => {
+                    this.broadcast({ type: 'gameOver', winner: -1, youWin: false, draw: true });
+                }, 1200);
+            } else {
+                this.broadcast(result);
+                const self = this;
+                this.settleTimer = setTimeout(() => self.newRound(), ROUND_DELAY);
+            }
+        }
+    }
+
+    rematch(idx) {
+        if (!this.over) return;
+        this.rematchReady[idx] = true;
+        const other = 1 - idx;
+        if (this.rematchReady[0] && this.rematchReady[1]) {
+            // 双方都点了再来一局，同房间重开
+            this.start();
+        } else {
+            // 通知对方我已准备
+            this.broadcastTo(other, { type: 'rematchWaiting' });
         }
     }
 
@@ -156,7 +187,7 @@ class Room {
     }
 
     destroy() {
-        clearInterval(this.interval);
+        if (this.settleTimer) clearTimeout(this.settleTimer);
         this.ws.forEach(ws => {
             try { ws.roomId = null; } catch (e) {}
         });
@@ -212,6 +243,11 @@ wss.on('connection', (ws) => {
                 if (room) room.play(ws, msg.card);
                 break;
             }
+            case 'rematch': {
+                const room = rooms.get(ws.roomId);
+                if (room) room.rematch(thisIdx(room, ws));
+                break;
+            }
             case 'chat': {
                 const room = rooms.get(ws.roomId);
                 if (room) room.chat(ws, msg.msg);
@@ -236,6 +272,8 @@ wss.on('connection', (ws) => {
         }
     });
 });
+
+function thisIdx(room, ws) { return room.ws.indexOf(ws); }
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => console.log(`皇帝与奴隶 服务器运行在 http://localhost:${PORT}`));

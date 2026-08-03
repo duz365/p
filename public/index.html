@@ -22,6 +22,7 @@
         }
         h2 { margin: 0 0 6px; letter-spacing: 3px; text-shadow: 0 0 12px rgba(212,175,55,.5); }
         .sub { font-size: .75rem; color: #8a7a4a; margin-bottom: 18px; }
+
         input, button { font-family: inherit; padding: 10px; margin: 5px; border-radius: 6px; }
         input { background: #14110c; color: #e0c88a; border: 1px solid #6b5a2a; letter-spacing: 4px; text-align: center; width: 130px; }
         button { background: #3a2f15; color: #e0c88a; border: 1px solid #d4af37; cursor: pointer; font-weight: bold; transition: all .2s; }
@@ -31,10 +32,8 @@
         .hidden { display: none !important; }
         #status { margin: 12px 0; font-style: italic; color: #cfb26a; min-height: 20px; }
         #banner { font-size: 1.1em; margin: 8px 0; }
-        #scoreBoard { display: flex; justify-content: space-around; margin: 8px 0 4px; font-size: .85em; }
-        #scoreBoard span { padding: 4px 12px; border: 1px solid #6b5a2a; border-radius: 6px;}
-        #scoreBoard .you { border-color: #d4af37; box-shadow: 0 0 8px rgba(212,175,55,.3); }
         #roundLabel { color: #cfb26a; font-size: .9em; margin-top: 8px; }
+        #handInfo { color: #8a7a4a; font-size: .75rem; margin-top: 4px; }
 
         #roundContainer { display: flex; justify-content: center; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
         .card {
@@ -56,7 +55,7 @@
         #result .win { color: #ffe14f; } #result .lose { color: #e05555; } #result .draw { color: #aaa; }
 
         #chatBox { margin-top: 12px; }
-        #messages { height: 90px; overflow-y: auto; text-align: left; border: 1px solid #3a3018; padding: 6px; margin: 8px 0; font-size: 13px; background: rgba(0,0,0,.25); }
+        #messages { height: 80px; overflow-y: auto; text-align: left; border: 1px solid #3a3018; padding: 6px; margin: 8px 0; font-size: 13px; background: rgba(0,0,0,.25); }
         #messages div { margin: 2px 0; }
         #messages .you { color: #9be07a; } #messages .opp { color: #e07a7a; } #messages .sys { color: #888; font-style: italic; }
         .chat-row { display: flex; gap: 6px; align-items: center; }
@@ -67,12 +66,13 @@
         #gameOver { position: absolute; inset: 0; background: rgba(0,0,0,.88); display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 12px; font-size: 18px; z-index: 5; }
         #gameOver .big { font-size: 46px; margin-bottom: 10px; }
         #gameOver button { margin-top: 16px; font-size: 15px; padding: 12px 28px; }
+        #rematchHint { color: #8a7a4a; font-size: .8rem; margin-top: 10px; min-height: 18px; }
     </style>
 </head>
 <body>
     <div id="app">
         <h2>👑 皇帝与奴隶 ⛓️</h2>
-        <div class="sub">心理博弈 · 12 回合定胜负</div>
+        <div class="sub">心理博弈 · 5 回合定胜负 · 输一回合即出局</div>
 
         <div id="roomArea">
             <div>创建或输入房间号</div>
@@ -87,11 +87,8 @@
         <div id="gameArea" class="hidden">
             <div id="status">等待对手加入...</div>
             <div id="banner"></div>
-            <div id="scoreBoard">
-                <span id="youScore" class="you">你 0</span>
-                <span id="oppScore">对手 0</span>
-            </div>
             <div id="roundLabel"></div>
+            <div id="handInfo"></div>
             <div id="roundContainer"></div>
             <button id="confirmBtn" disabled>确认出牌</button>
             <div id="result"></div>
@@ -116,7 +113,7 @@
         <div id="gameOver" class="hidden">
             <div class="big" id="goEmoji"></div>
             <div id="goText"></div>
-            <div id="goDetail"></div>
+            <div id="rematchHint"></div>
             <button id="restartBtn">🔁 再来一局</button>
         </div>
     </div>
@@ -127,12 +124,11 @@
         const NM = { emperor:'皇帝', citizen:'市民', slave:'奴隶' };
 
         let ws = null, roomId = null;
-        let myIdx = -1, mySide = null, round = 0;
-        let scores = [0, 0];
+        let myIdx = -1, mySide = null, round = 0, totalRounds = 5;
+        let hand = [];
         let selectedCard = null, selectedEl = null;
-        let cards = [];
         let locked = false;
-        let wasSwapped = false;
+        let over = false;
 
         let reconnectTimer = null;
         let manualClose = false;
@@ -156,9 +152,7 @@
                 let m; try { m = JSON.parse(e.data); } catch { return; }
                 handle(m);
             };
-            ws.onerror = () => {
-                $('error').textContent = '连接出错，正在重连…';
-            };
+            ws.onerror = () => { $('error').textContent = '连接出错，正在重连…'; };
             ws.onclose = () => {
                 if (manualClose) return;
                 $('status').textContent = '连接已断开，正在重连…';
@@ -180,28 +174,25 @@
                     showStatus('已加入，等待开局…');
                     break;
                 case 'gameStart':
-                    myIdx = m.player; mySide = m.side;
+                    myIdx = m.player; mySide = m.side; totalRounds = m.round || 5;
                     showGameArea();
                     renderSide();
-                    break;
-                case 'sideSwap':
-                    mySide = m.newSide;
-                    renderSide();
+                    over = false;
                     break;
                 case 'newRound':
                     round = m.round;
-                    scores = m.scores.slice();
+                    hand = m.hand.slice();
                     locked = false;
+                    selectedCard = null; selectedEl = null;
                     renderSide();
-                    renderScore();
-                    $('roundLabel').textContent = `第 ${round} / ${m.total} 回合${m.swapped && !wasSwapped ? ' · 阵营已交换！' : ''}`;
-                    wasSwapped = !!m.swapped;
+                    $('roundLabel').textContent = `第 ${round} / ${m.total} 回合`;
                     $('result').textContent = '';
-                    buildCards(mySide);
+                    buildCards();
                     showStatus('');
                     break;
                 case 'moveLocked':
                     locked = true;
+                    hand = m.hand.slice();
                     $('confirmBtn').disabled = true;
                     disableCards();
                     showStatus(`你已出 <b>${NM[m.card]}</b>，等待对手…`);
@@ -209,11 +200,16 @@
                 case 'roundResult':
                     renderResult(m);
                     break;
+                case 'gameReady':
+                    break;
                 case 'chat':
                     addChat(m.from === myIdx ? 'you' : 'opp', m.msg);
                     break;
                 case 'gameOver':
                     showGameOver(m);
+                    break;
+                case 'rematchWaiting':
+                    $('rematchHint').textContent = '对手已点「再来一局」，等待你确认…';
                     break;
                 case 'opponentLeft':
                     showGameOver({ aborted: true });
@@ -232,33 +228,23 @@
         function renderSide() {
             $('banner').innerHTML = `你的阵营：<strong>${mySide === 'emperor' ? '👑 皇帝方' : '⛓️ 奴隶方'}</strong>`;
         }
-        function renderScore() {
-            $('youScore').textContent = `你 ${scores[myIdx]}`;
-            $('oppScore').textContent = `对手 ${scores[1 - myIdx]}`;
-        }
 
-        function buildCards(side) {
-            const special = side === 'emperor' ? 'emperor' : 'slave';
-            cards = [special, 'citizen', 'citizen', 'citizen', 'citizen'];
-            for (let i = cards.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [cards[i], cards[j]] = [cards[j], cards[i]];
-            }
-            selectedCard = null; selectedEl = null;
+        function buildCards() {
             const box = $('roundContainer');
             box.innerHTML = '';
-            cards.forEach(card => {
+            hand.forEach(card => {
                 const d = document.createElement('div');
                 d.className = 'card ' + card;
                 d.innerHTML = `<div class="emoji">${EM[card]}</div><div class="name">${NM[card]}</div>`;
                 d.onclick = () => selectCard(card, d);
                 box.appendChild(d);
             });
+            $('handInfo').textContent = `剩余手牌 ${hand.length} 张 · 用过即弃`;
             $('confirmBtn').disabled = true;
         }
 
         function selectCard(card, el) {
-            if (locked) return;
+            if (locked || over) return;
             if (selectedEl === el) {
                 selectedEl.classList.remove('selected');
                 selectedCard = null; selectedEl = null;
@@ -279,7 +265,7 @@
         }
 
         $('confirmBtn').onclick = () => {
-            if (selectedCard == null || locked) return;
+            if (selectedCard == null || locked || over) return;
             locked = true;
             $('confirmBtn').disabled = true;
             selectedEl.classList.add('used');
@@ -288,16 +274,13 @@
         };
 
         function renderResult(m) {
-            // m.cards = [c1name, c2name], m.cards 用名称字符串
             const myName = m.cards[myIdx];
             const oppName = m.cards[1 - myIdx];
             let line;
-            if (m.winner === myIdx) line = `<span class="win">🎉 你赢了！+${m.score} 分</span>`;
-            else if (m.winner === -1) line = `<span class="draw">🤝 平局</span>`;
-            else line = `<span class="lose">💔 你输了，对手 +${m.score} 分</span>`;
+            if (m.winner === myIdx) line = `<span class="win">🎉 你赢了这回合，对手出局！</span>`;
+            else if (m.winner === -1) line = `<span class="draw">🤝 平局，进入下一回合</span>`;
+            else line = `<span class="lose">💔 你输了这回合，出局！</span>`;
             $('result').innerHTML = `第${m.round}回合 · 你出 <strong>${myName}</strong> vs 对手出 <strong>${oppName}</strong><br>${line}`;
-            scores = m.scores.slice();
-            renderScore();
         }
 
         function addChat(who, msg) {
@@ -310,22 +293,23 @@
         }
 
         function showGameOver(m) {
+            over = true;
             $('gameOver').classList.remove('hidden');
+            $('rematchHint').textContent = '';
             if (m && m.aborted) {
                 $('goEmoji').textContent = '🚪';
                 $('goText').textContent = '对手离开了';
-                $('goDetail').textContent = '';
-            } else if (m.youWin === true) {
+                $('restartBtn').style.display = 'none';
+            } else if (m && m.draw) {
+                $('goEmoji').textContent = '🤝';
+                $('goText').textContent = '5 回合全平局！';
+            } else if (m && m.youWin === true) {
                 $('goEmoji').textContent = '👑';
                 $('goText').textContent = '你赢了！';
-            } else if (m.youWin === false) {
+            } else {
                 $('goEmoji').textContent = '⛓️';
                 $('goText').textContent = '你输了…';
-            } else {
-                $('goEmoji').textContent = '🤝';
-                $('goText').textContent = '平局';
             }
-            if (m && m.scores) $('goDetail').textContent = `最终比分 ${m.scores[myIdx]} : ${m.scores[1 - myIdx]}`;
         }
 
         $('createBtn').onclick = () => { $('error').textContent = ''; ws.send(JSON.stringify({ type: 'create' })); };
@@ -353,7 +337,13 @@
             };
         });
 
-        $('restartBtn').onclick = () => location.reload();
+        // 再来一局：直接通知服务器，同房间重开，无需重建房间
+        $('restartBtn').onclick = () => {
+            $('gameOver').classList.add('hidden');
+            showStatus('已请求再来一局，等待对手…');
+            ws.send(JSON.stringify({ type: 'rematch' }));
+        };
+
         connect();
     </script>
 </body>
